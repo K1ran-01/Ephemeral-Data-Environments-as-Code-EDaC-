@@ -39,6 +39,15 @@ jobs:
         run: terraform init
         working-directory: ./terraform
 
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var="pr_number=${{ github.event.pull_request.number }}" \
+            -var="pr_author=${{ github.event.pull_request.user.login }}" \
+            -var="service_principal_id=${{ secrets.SERVICE_PRINCIPAL_ID }}"
+        working-directory: ./terraform
+
       - name: Terraform Apply
         id: apply
         run: |
