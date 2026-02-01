@@ -51,7 +51,7 @@ df_orders.printSchema()
 df_orders.show(5)
 
 # Example of writing to the catalog
-# df_customers.write.format("delta").mode("overwrite").saveAsTable(f"{catalog_name}.{schema_name}.customers")
-# df_orders.write.format("delta").mode("overwrite").saveAsTable(f"{catalog_name}.{schema_name}.orders")
+df_customers.write.format("delta").mode("overwrite").saveAsTable(f"{catalog_name}.{schema_name}.customers")
+df_orders.write.format("delta").mode("overwrite").saveAsTable(f"{catalog_name}.{schema_name}.orders")
 
 print(f"Data generation script finished. In a real run, data would be written to catalog: '{catalog_name}'")
