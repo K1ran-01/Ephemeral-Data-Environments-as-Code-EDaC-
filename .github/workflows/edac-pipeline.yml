@@ -1,0 +1,91 @@
+name: EDaC Pipeline for PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  # This job runs when a PR is opened, reopened, or updated
+  setup_and_test:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.1.0
+
+      - name: Configure Databricks CLI
+        run: |
+          echo "Configuring Databricks CLI"
+          # In a real environment, you would use secrets
+          # export DATABRICKS_HOST=${{ secrets.DATABRICKS_HOST }}
+          # export DATABRICKS_TOKEN=${{ secrets.DATABRICKS_TOKEN }}
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ./terraform
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply -auto-approve \
+            -var="pr_number=${{ github.event.pull_request.number }}" \
+            -var="pr_author=${{ github.event.pull_request.user.login }}" \
+            -var="service_principal_id=${{ secrets.SERVICE_PRINCIPAL_ID }}"
+        working-directory: ./terraform
+
+      - name: Run Liquibase Migrations
+        run: |
+          echo "Running Liquibase migrations..."
+          # This step would require a Docker container with Liquibase and the Databricks driver
+          # The command would look something like this:
+          # docker run --rm -v $(pwd)/liquibase:/liquibase/changelog liquibase/liquibase:4.9.1 \
+          #   --defaultsFile=/liquibase/changelog/liquibase.properties \
+          #   --logLevel=info update
+          echo "Liquibase migrations would run here."
+        
+      - name: Generate Synthetic Data
+        run: |
+          echo "Generating synthetic data..."
+          # This would run the dbldatagen script on a Databricks cluster
+          # using the Databricks CLI or a custom action.
+          # For example:
+          # databricks jobs create --json-file path/to/job-def.json
+          # The job would run the scripts/generate_data.py script.
+          echo "dbldatagen script would run here."
+          
+      - name: Run dbt tests
+        run: |
+          echo "Running dbt tests..."
+          # This would run dbt commands against the ephemeral, populated database
+          # dbt test --profiles-dir . --target pr
+          echo "dbt tests would run here."
+
+  # This job runs only when a PR is closed (merged or not)
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Trigger Cleanup Controller
+        run: |
+          echo "Triggering the cleanup controller..."
+          # In a real-world scenario, you would trigger a webhook or a service
+          # that runs the scripts/cleanup_controller.py script.
+          # This could be a call to an AWS Lambda function, a Google Cloud Function,
+          # or a service running in a container.
+          # The PR number would be passed in the payload.
+          #
+          # Example of invoking a webhook:
+          # curl -X POST -H "Content-Type: application/json" \
+          #   -d '{"pr_number": "${{ github.event.pull_request.number }}"}' \
+          #   ${{ secrets.CLEANUP_WEBHOOK_URL }}
+          python scripts/cleanup_controller.py
+          echo "Cleanup for PR #${{ github.event.pull_request.number }} has been triggered."
