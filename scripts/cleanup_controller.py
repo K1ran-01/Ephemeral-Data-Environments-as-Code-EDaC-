@@ -1,122 +1,74 @@
 import os
 import json
 import requests
-# In a real implementation, you would use the Terraform Python library
-# or shell out to the `terraform` CLI.
+import argparse # New import
 
-# --- Configuration ---
-# These would be set via environment variables or a config file
-TERRAFORM_STATE_FILE = os.getenv("TERRAFORM_STATE_FILE", "path/to/your/terraform.tfstate")
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-REPO_NAME = os.getenv("REPO_NAME", "your-org/your-repo")
 
-def get_pr_resources_from_state(pr_number):
-    """
-    Parses the Terraform state file to find resources associated with a specific PR.
-    This is a simplified example. A robust solution would use a proper
-    Terraform state parsing library or the `terraform output` command.
-    """
-    try:
-        with open(TERRAFORM_STATE_FILE, 'r') as f:
-            state = json.load(f)
-
-        pr_resources = {
-            "catalog_name": None,
-            "warehouse_id": None
-        }
-
-        # This logic is highly dependent on your Terraform resource structure
-        for resource in state.get("resources", []):
-            if resource["mode"] == "managed" and resource["type"] == "databricks_catalog":
-                for instance in resource["instances"]:
-                    name = instance["attributes"]["name"]
-                    if f"sandbox_pr_{pr_number}" in name:
-                        pr_resources["catalog_name"] = name
-            
-            if resource["mode"] == "managed" and resource["type"] == "databricks_sql_warehouse":
-                for instance in resource["instances"]:
-                    name = instance["attributes"]["name"]
-                    if f"pr_warehouse_{pr_number}" in name:
-                        pr_resources["warehouse_id"] = instance["attributes"]["id"]
-
-        if pr_resources["catalog_name"]:
-            return pr_resources
-        else:
-            return None
-
-    except FileNotFoundError:
-        print(f"Error: Terraform state file not found at {TERRAFORM_STATE_FILE}")
-        return None
-    except Exception as e:
-        print(f"An error occurred while parsing the state file: {e}")
-        return None
-
-
-def cleanup_databricks_resources(resources):
+def cleanup_databricks_resources(catalog_name, warehouse_id):
     """
     Uses the Databricks API to delete the ephemeral resources.
     """
-    if not resources or not resources.get("catalog_name"):
-        print("No resources to clean up.")
+    if not catalog_name:
+        print("No catalog name provided for cleanup.")
         return
 
-    print(f"Starting cleanup for catalog: {resources['catalog_name']}")
+    print(f"Starting cleanup for catalog: {catalog_name}")
 
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
 
     # 1. Delete the Catalog (requires all objects within to be deleted first)
     # This is a recursive delete, which is a powerful and dangerous operation.
     # The Databricks API for Unity Catalog requires care.
-    catalog_url = f"https://{DATABRICKS_HOST}/api/2.1/unity-catalog/catalogs/{resources['catalog_name']}?force=true"
+    catalog_url = f"https://{DATABRICKS_HOST}/api/2.1/unity-catalog/catalogs/{catalog_name}?force=true"
     response = requests.delete(catalog_url, headers=headers)
     if response.status_code == 200:
-        print(f"Successfully deleted catalog: {resources['catalog_name']}")
+        print(f"Successfully deleted catalog: {catalog_name}")
     else:
         print(f"Error deleting catalog: {response.status_code} - {response.text}")
 
     # 2. Delete the SQL Warehouse
-    if resources.get("warehouse_id"):
-        warehouse_url = f"https://{DATABRICKS_HOST}/api/2.0/sql/warehouses/{resources['warehouse_id']}"
+    if warehouse_id:
+        warehouse_url = f"https://{DATABRICKS_HOST}/api/2.0/sql/warehouses/{warehouse_id}"
         response = requests.delete(warehouse_url, headers=headers)
         if response.status_code == 200:
-            print(f"Successfully deleted SQL warehouse: {resources['warehouse_id']}")
+            print(f"Successfully deleted SQL warehouse: {warehouse_id}")
         else:
             print(f"Error deleting SQL warehouse: {response.status_code} - {response.text}")
 
 
-def handle_pr_closed_event(pr_number):
+def handle_pr_closed_event(pr_number, catalog_name=None, warehouse_id=None):
     """
     Main handler for a 'PR Closed' event.
     """
     print(f"Received 'PR Closed' event for PR #{pr_number}")
     
     # In a real scenario, you would first run `terraform destroy` for the specific PR workspace.
-    # This is a safer way to ensure all resources are removed.
-    # For this research project, we demonstrate direct state parsing and API calls.
-    
-    resources_to_clean = get_pr_resources_from_state(pr_number)
-    
-    if resources_to_clean:
-        cleanup_databricks_resources(resources_to_clean)
+    # By passing catalog_name and warehouse_id directly, we are moving closer to that robust approach.
+
+    if catalog_name:
+        cleanup_databricks_resources(catalog_name, warehouse_id)
     else:
-        print(f"No Terraform-managed resources found for PR #{pr_number}")
+        print(f"No catalog name provided for PR #{pr_number}. Skipping cleanup.")
 
 
 if __name__ == "__main__":
     # This is a simulation of the controller being triggered.
     # In a real application, this would be triggered by a webhook from GitHub.
     # For example, an AWS Lambda function or a service running in a container.
-    
-    # You would get the PR number from the GitHub webhook payload.
-    example_pr_number = 123
+
+    parser = argparse.ArgumentParser(description="Cleanup controller for ephemeral Databricks resources.")
+    parser.add_argument("--pr-number", type=int, required=True, help="The pull request number.")
+    parser.add_argument("--catalog-name", type=str, help="The name of the Unity Catalog to clean up.")
+    parser.add_argument("--warehouse-id", type=str, help="The ID of the SQL Warehouse to clean up.")
+
+    args = parser.parse_args()
     
     print("--- State-Aware Cleanup Controller ---")
     print("This script is a conceptual model.")
     print("It outlines the logic for cleaning up ephemeral resources after a PR is closed.")
     print("In a real implementation, this would be part of a robust CI/CD webhook system.\n")
-
-    handle_pr_closed_event(example_pr_number)
+    handle_pr_closed_event(args.pr_number, args.catalog_name, args.warehouse_id)
 
     print("\nCleanup controller simulation finished.")
