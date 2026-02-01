@@ -1,0 +1,214 @@
+name: EDaC Pipeline for PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  # This job runs when a PR is opened, reopened, or updated
+  setup_and_test:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      catalog_name: ${{ steps.terraform_output.outputs.catalog_name }}
+      schema_name: ${{ steps.terraform_output.outputs.schema_name }}
+      schema_full_name: ${{ steps.terraform_output.outputs.schema_full_name }}
+      warehouse_id: ${{ steps.terraform_output.outputs.warehouse_id }}
+      warehouse_http_path: ${{ steps.terraform_output.outputs.warehouse_http_path }}
+    env: # Define environment variables for the entire job
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      TF_VAR_databricks_host: ${{ secrets.DATABRICKS_HOST }}
+      TF_VAR_databricks_token: ${{ secrets.DATABRICKS_TOKEN }}
+
+    # Ensure secrets are available for all Terraform steps
+    steps:
+      - name: Export Databricks secrets
+        run: |
+          echo "DATABRICKS_HOST=${{ secrets.DATABRICKS_HOST }}" >> $GITHUB_ENV
+          echo "DATABRICKS_TOKEN=${{ secrets.DATABRICKS_TOKEN }}" >> $GITHUB_ENV
+          echo "TF_VAR_databricks_host=${{ secrets.DATABRICKS_HOST }}" >> $GITHUB_ENV
+          echo "TF_VAR_databricks_token=${{ secrets.DATABRICKS_TOKEN }}" >> $GITHUB_ENV
+        shell: bash
+      # ...existing code...
+      
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Azure Login
+        run: |
+          az login --service-principal \
+            -u ${{ secrets.AZURE_USER }} \
+            -p ${{ secrets.AZURE_PASSWORD }} \
+            --tenant ${{ secrets.AZURE_TENANT }}
+        shell: bash
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.1.0
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ./terraform
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var="pr_number=${{ github.event.pull_request.number }}" \
+            -var="pr_author=${{ github.event.pull_request.user.login }}" \
+            -var="service_principal_id=${{ secrets.SERVICE_PRINCIPAL_ID }}"
+        working-directory: ./terraform
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply -auto-approve \
+            -var="pr_number=${{ github.event.pull_request.number }}" \
+            -var="pr_author=${{ github.event.pull_request.user.login }}" \
+            -var="service_principal_id=${{ secrets.SERVICE_PRINCIPAL_ID }}"
+        working-directory: ./terraform
+
+      - name: Get Terraform Outputs
+        id: terraform_output
+        run: |
+          echo "catalog_name=$(terraform output -raw catalog_name)" >> "$GITHUB_OUTPUT"
+          echo "schema_name=$(terraform output -raw schema_name)" >> "$GITHUB_OUTPUT"
+          echo "schema_full_name=$(terraform output -raw schema_full_name)" >> "$GITHUB_OUTPUT"
+          echo "warehouse_id=$(terraform output -raw warehouse_id)" >> "$GITHUB_OUTPUT"
+          echo "warehouse_http_path=$(terraform output -raw warehouse_http_path)" >> "$GITHUB_OUTPUT"
+        working-directory: ./terraform
+
+      - name: Run Liquibase Migrations
+        run: |
+          echo "Running Liquibase migrations..."
+          docker run --rm \
+            -v ${{ github.workspace }}/liquibase:/liquibase/changelog \
+            -e DATABRICKS_HOST=${{ env.DATABRICKS_HOST }} \
+            -e DATABRICKS_TOKEN=${{ env.DATABRICKS_TOKEN }} \
+            -e WAREHOUSE_HTTP_PATH=${{ steps.terraform_output.outputs.warehouse_http_path }} \
+            -e CATALOG_NAME=${{ steps.terraform_output.outputs.catalog_name }} \
+            -e SCHEMA_NAME=${{ steps.terraform_output.outputs.schema_name }} \
+            liquibase/liquibase:4.9.1 \
+            --defaultsFile=/liquibase/changelog/liquibase.properties \
+            --logLevel=info \
+            update
+          echo "Liquibase migrations completed."
+
+      - name: Generate Synthetic Data
+        run: |
+          echo "Uploading generate_data.py to Databricks workspace..."
+          # Define a unique path in the workspace for the script
+          SCRIPT_WORKSPACE_PATH="/Workspace/Users/${{ github.event.pull_request.user.login }}/pr_data_gen_${{ github.event.pull_request.number }}/generate_data.py"
+          
+          # Upload the script
+          databricks workspace import --overwrite --format SOURCE \
+            --path "$SCRIPT_WORKSPACE_PATH" \
+            --language PYTHON \
+            ./scripts/generate_data.py
+          
+          echo "Submitting dbldatagen script to Databricks cluster..."
+          # Use databricks run-now to execute the uploaded script on a new job cluster
+          databricks jobs run-now --json '{
+            "run_name": "pr-data-gen-${{ github.event.pull_request.number }}",
+            "new_cluster": {
+              "spark_version": "13.3.x-scala2.12", # Choose a suitable Spark version
+              "node_type_id": "Standard_DS3_v2", # Choose a suitable node type
+              "num_workers": 1,
+              "data_security_mode": "UNITY_CATALOG", # Essential for Unity Catalog access
+              "spark_env_vars": {
+                "CATALOG_NAME": "${{ steps.terraform_output.outputs.catalog_name }}",
+                "SCHEMA_NAME": "${{ steps.terraform_output.outputs.schema_name }}"
+              }
+            },
+            "spark_python_task": {
+              "python_file": "'"$SCRIPT_WORKSPACE_PATH"'"
+            },
+            "timeout_seconds": 3600
+          }' --wait
+          
+          echo "dbldatagen script submission complete."
+          
+      - name: Install dbt
+        run: |
+          pip install dbt-databricks
+
+      - name: Configure dbt profiles.yml
+        run: |
+          mkdir -p ~/.dbt
+          echo "eda_pipeline:" > ~/.dbt/profiles.yml
+          echo "  target: pr" >> ~/.dbt/profiles.yml
+          echo "  outputs:" >> ~/.dbt/profiles.yml
+          echo "    pr:" >> ~/.dbt/profiles.yml
+          echo "      type: databricks" >> ~/.dbt/profiles.yml
+          echo "      host: \"{{ env_var('DATABRICKS_HOST') }}\"" >> ~/.dbt/profiles.yml
+          echo "      http_path: \"{{ env_var('WAREHOUSE_HTTP_PATH') }}\"" >> ~/.dbt/profiles.yml
+          echo "      token: \"{{ env_var('DATABRICKS_TOKEN') }}\"" >> ~/.dbt/profiles.yml
+          echo "      catalog: \"{{ env_var('CATALOG_NAME') }}\"" >> ~/.dbt/profiles.yml
+          echo "      schema: \"{{ env_var('SCHEMA_NAME') }}\"" >> ~/.dbt/profiles.yml
+          echo "      threads: 1" >> ~/.dbt/profiles.yml
+
+      - name: Run dbt debug
+        run: |
+          echo "Running dbt debug..."
+          dbt debug --profiles-dir .
+        working-directory: ./dbt
+        env:
+          WAREHOUSE_HTTP_PATH: ${{ steps.terraform_output.outputs.warehouse_http_path }}
+          CATALOG_NAME: ${{ steps.terraform_output.outputs.catalog_name }}
+          SCHEMA_NAME: ${{ steps.terraform_output.outputs.schema_name }}
+
+      - name: Run dbt models
+        run: |
+          echo "Running dbt models..."
+          dbt run --profiles-dir .
+        working-directory: ./dbt
+        env:
+          WAREHOUSE_HTTP_PATH: ${{ steps.terraform_output.outputs.warehouse_http_path }}
+          CATALOG_NAME: ${{ steps.terraform_output.outputs.catalog_name }}
+          SCHEMA_NAME: ${{ steps.terraform_output.outputs.schema_name }}
+
+      - name: Run dbt tests
+        run: |
+          echo "Running dbt tests..."
+          dbt test --profiles-dir .
+        working-directory: ./dbt
+        env:
+          WAREHOUSE_HTTP_PATH: ${{ steps.terraform_output.outputs.warehouse_http_path }}
+          CATALOG_NAME: ${{ steps.terraform_output.outputs.catalog_name }}
+          SCHEMA_NAME: ${{ steps.terraform_output.outputs.schema_name }}
+
+  # The cleanup job starts here. It was previously being misinterpreted due to the missing EOF.
+  # This comment is for clarity in the diff, not part of the actual file.
+  cleanup:
+    needs: setup_and_test # Ensure cleanup runs after setup_and_test, to get its outputs
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set environment variables for cleanup
+        run: |
+          echo "DATABRICKS_HOST=${{ secrets.DATABRICKS_HOST }}" >> $GITHUB_ENV
+          echo "DATABRICKS_TOKEN=${{ secrets.DATABRICKS_TOKEN }}" >> $GITHUB_ENV
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Trigger Cleanup Controller
+        run: |
+          echo "Triggering the cleanup controller..."
+          # In a real-world scenario, you would trigger a webhook or a service
+          # that runs the scripts/cleanup_controller.py script.
+          # This could be a call to an AWS Lambda function, a Google Cloud Function,
+          # or a service running in a container.
+          # The PR number would be passed in the payload.
+          #
+          # Example of invoking a webhook:
+          # curl -X POST -H "Content-Type: application/json" \
+          #   -d '{"pr_number": "${{ github.event.pull_request.number }}"}' \
+          #   ${{ secrets.CLEANUP_WEBHOOK_URL }}          
+          python scripts/cleanup_controller.py \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --catalog-name "${{ needs.setup_and_test.outputs.catalog_name }}" \
+            --warehouse-id "${{ needs.setup_and_test.outputs.warehouse_id }}"
+          echo "Cleanup for PR #${{ github.event.pull_request.number }} has been triggered."
