@@ -5,6 +5,7 @@ resource "databricks_catalog" "pr_sandbox" {
   properties = {
     "managed-by" = "eda-controller"
   }
+  storage_root = "<PASTE_YOUR_METASTORE_ROOT_STORAGE_PATH_HERE>/pr_sandboxes/${var.pr_number}"
 }
 
 # Create a serverless SQL endpoint for the PR
