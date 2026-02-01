@@ -7,8 +7,8 @@ resource "databricks_catalog" "pr_sandbox" {
   }
 }
 
-# Create a serverless SQL warehouse for the PR
-resource "databricks_sql_warehouse" "pr_warehouse" {
+# Create a serverless SQL endpoint for the PR
+resource "databricks_sql_endpoint" "pr_warehouse" {
   name                         = "pr_warehouse_${var.pr_number}"
   cluster_size                 = "2X-Small"
   enable_serverless_compute    = true
