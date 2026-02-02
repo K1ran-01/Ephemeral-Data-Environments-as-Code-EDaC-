@@ -1,5 +1,13 @@
 output "catalog_name" {
-  value = databricks_catalog.pr_sandbox.name
+  value = local.existing_catalog
+}
+
+output "schema_name" {
+  value = databricks_schema.pr_schema.name
+}
+
+output "schema_full_name" {
+  value = databricks_schema.pr_schema.id
 }
 
 output "warehouse_id" {
